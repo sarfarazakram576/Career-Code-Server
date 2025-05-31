@@ -4,9 +4,58 @@ const cors = require("cors");
 const app = express();
 const port = process.env.PORT || 3000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
 
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://sage-phoenix-1b038d.netlify.app",
+      "career-code-5bf13.web.app",
+      "career-code-5bf13.firebaseapp.com",
+    ],
+    credentials: true,
+  })
+);
 app.use(express.json());
+app.use(cookieParser());
+
+var admin = require("firebase-admin");
+
+var serviceAccount = require("./firebase-admin-key.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const verifyToken = (req, res, next) => {
+  const token = req?.cookies?.token;
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  jwt.verify(token, process.env.JWT_ACCESS_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ message: "Unauthorized access" });
+    }
+    req.decoded = decoded;
+    next();
+  });
+};
+
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req?.headers?.authorization;
+  const token = authHeader.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  const userInfo = await admin.auth().verifyIdToken(token);
+  req.tokenEmail = userInfo.email;
+  next();
+};
 
 app.get("/", (req, res) => {
   res.send("Job portal is running");
@@ -30,6 +79,20 @@ async function run() {
     const applicationsCollection = client
       .db("Career-Code")
       .collection("applications");
+
+    app.post("/jwt", async (req, res) => {
+      const userData = req.body;
+      const token = jwt.sign(userData, process.env.JWT_ACCESS_SECRET, {
+        expiresIn: "1d",
+      });
+
+      res.cookie("token", token, {
+        httpOnly: true,
+        secure: false,
+      });
+
+      res.send({ success: true });
+    });
 
     app.get("/jobs", async (req, res) => {
       const email = req.query.email;
@@ -85,8 +148,13 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/applications", async (req, res) => {
+    app.get("/applications", verifyFirebaseToken, async (req, res) => {
       const email = req.query.email;
+
+      if (email !== req.tokenEmail) {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
+
       const query = { applicant: email };
       const result = await applicationsCollection.find(query).toArray();
 
