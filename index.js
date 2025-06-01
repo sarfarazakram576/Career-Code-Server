@@ -4,62 +4,45 @@ const cors = require("cors");
 const app = express();
 const port = process.env.PORT || 3000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const jwt = require("jsonwebtoken");
-const cookieParser = require("cookie-parser");
 
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "https://sage-phoenix-1b038d.netlify.app",
-      "career-code-5bf13.web.app",
-      "career-code-5bf13.firebaseapp.com",
-    ],
-    credentials: true,
-  })
-);
+app.use(cors());
 app.use(express.json());
-app.use(cookieParser());
-
-var admin = require("firebase-admin");
-
-var serviceAccount = require("./firebase-admin-key.json");
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
-const verifyToken = (req, res, next) => {
-  const token = req?.cookies?.token;
-  if (!token) {
-    return res.status(401).send({ message: "Unauthorized access" });
-  }
-
-  jwt.verify(token, process.env.JWT_ACCESS_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(401).send({ message: "Unauthorized access" });
-    }
-    req.decoded = decoded;
-    next();
-  });
-};
-
-const verifyFirebaseToken = async (req, res, next) => {
-  const authHeader = req?.headers?.authorization;
-  const token = authHeader.split(" ")[1];
-
-  if (!token) {
-    return res.status(401).send({ message: "Unauthorized access" });
-  }
-
-  const userInfo = await admin.auth().verifyIdToken(token);
-  req.tokenEmail = userInfo.email;
-  next();
-};
 
 app.get("/", (req, res) => {
   res.send("Job portal is running");
 });
+
+const admin = require("firebase-admin");
+const serviceAccount = require("./firebase-admin-key.json");
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req?.headers?.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.decoded = decoded;
+
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+};
+
+const verifyTokenEmail = (req, res, next) => {
+  if (req.query.email !== req.decoded.email) {
+    return res.status(403).send({ message: "Forbidden Access" });
+  }
+  next();
+};
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.or0q8ig.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -80,20 +63,6 @@ async function run() {
       .db("Career-Code")
       .collection("applications");
 
-    app.post("/jwt", async (req, res) => {
-      const userData = req.body;
-      const token = jwt.sign(userData, process.env.JWT_ACCESS_SECRET, {
-        expiresIn: "1d",
-      });
-
-      res.cookie("token", token, {
-        httpOnly: true,
-        secure: false,
-      });
-
-      res.send({ success: true });
-    });
-
     app.get("/jobs", async (req, res) => {
       const email = req.query.email;
       let query = {};
@@ -112,21 +81,27 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/jobs/applications", async (req, res) => {
-      const { email } = req.query;
-      const query = { hr_email: email };
-      const jobs = await jobsCollection.find(query).toArray();
+    app.get(
+      "/jobs/applications",
+      verifyFirebaseToken,
+      verifyTokenEmail,
+      async (req, res) => {
+        const { email } = req.query;
 
-      for (const job of jobs) {
-        const applicationQuery = { jobId: String(job._id) };
-        const application_count = await applicationsCollection.countDocuments(
-          applicationQuery
-        );
-        job.applicationCount = application_count;
+        const query = { hr_email: email };
+        const jobs = await jobsCollection.find(query).toArray();
+
+        for (const job of jobs) {
+          const applicationQuery = { jobId: job._id.toString() };
+          const application_count = await applicationsCollection.countDocuments(
+            applicationQuery
+          );
+          job.applicationCount = application_count;
+        }
+
+        res.send(jobs);
       }
-
-      res.send(jobs);
-    });
+    );
 
     app.get("/jobs/:id", async (req, res) => {
       const result = await jobsCollection.findOne({
@@ -148,12 +123,8 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/applications", verifyFirebaseToken, async (req, res) => {
+    app.get("/applications", verifyFirebaseToken, verifyTokenEmail, async (req, res) => {
       const email = req.query.email;
-
-      if (email !== req.tokenEmail) {
-        return res.status(403).send({ message: "Forbidden access" });
-      }
 
       const query = { applicant: email };
       const result = await applicationsCollection.find(query).toArray();
